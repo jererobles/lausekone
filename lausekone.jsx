@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
-import { Loader2, ChevronDown, ChevronUp, X, BookOpen, CornerDownLeft } from "lucide-react";
+import { createRoot } from "react-dom/client";
+import { Loader2, ChevronDown, ChevronUp, X, BookOpen, CornerDownLeft, KeyRound } from "lucide-react";
 
 // ---------------- palette: hanki (snow crust) + ink + steel blue; case colors do the marimekko pop ----------------
 const INK = "#151A1E";
@@ -93,6 +94,29 @@ const CHEATSHEET = [
   },
 ];
 
+// ---------------- api key (byok, stored only in localStorage) ----------------
+
+const KEY_LS = "lausekone.apiKey";
+
+function getStoredKey() {
+  try {
+    return localStorage.getItem(KEY_LS) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function storeKey(k) {
+  try {
+    if (k) localStorage.setItem(KEY_LS, k);
+    else localStorage.removeItem(KEY_LS);
+  } catch (e) {
+    // private browsing etc. — key just won't persist
+  }
+}
+
+const maskKey = (k) => (k && k.length > 12 ? k.slice(0, 10) + "…" + k.slice(-4) : "•••");
+
 // ---------------- api plumbing ----------------
 
 function buildParsePrompt(sentence) {
@@ -115,16 +139,32 @@ function buildParsePrompt(sentence) {
 }
 
 async function callClaude(prompt) {
+  const key = getStoredKey();
+  if (!key) {
+    throw new Error("no api key set — add your anthropic api key in “avain · api key” above.");
+  }
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1000,
       messages: [{ role: "user", content: prompt }],
     }),
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error("api key rejected (401) — check it in “avain · api key” above.");
+    }
+    const msg = data && data.error && data.error.message ? data.error.message : "http " + res.status;
+    throw new Error(msg);
+  }
   const text = (data.content || [])
     .filter((b) => b.type === "text")
     .map((b) => b.text)
@@ -133,7 +173,7 @@ async function callClaude(prompt) {
   return JSON.parse(clean);
 }
 
-// unofficial endpoint; the artifact sandbox's csp usually blocks it — we fall back silently
+// unofficial endpoint; may be blocked by network/CORS — we fall back silently
 async function tryGoogle(text, tl) {
   try {
     const url =
@@ -351,6 +391,26 @@ export default function Lausekone() {
   const [cdefs, setCdefs] = useState({});
   const [showSheet, setShowSheet] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [apiKey, setApiKey] = useState(() => getStoredKey());
+  const [keyDraft, setKeyDraft] = useState("");
+  const [keyOpen, setKeyOpen] = useState(false);
+
+  const saveKey = () => {
+    const k = keyDraft.trim();
+    if (!k) return;
+    storeKey(k);
+    setApiKey(k);
+    setKeyDraft("");
+    setKeyOpen(false);
+    setErr(null);
+  };
+
+  const clearKey = () => {
+    storeKey(null);
+    setApiKey("");
+    setKeyDraft("");
+    setKeyOpen(false);
+  };
 
   const analyze = useCallback(
     async (raw) => {
@@ -410,7 +470,7 @@ export default function Lausekone() {
       setWikt((w) =>
         Object.assign({}, w, {
           [key]: {
-            err: "unreachable — the artifact sandbox blocks third-party fetches (or no entry exists). ask claude below, or run this file outside claude.ai and this button works.",
+            err: "no finnish entry found, or wiktionary is unreachable. ask claude instead:",
           },
         })
       );
@@ -454,8 +514,78 @@ export default function Lausekone() {
           boundaries, and arcs showing which word governs which.
         </p>
 
+        {/* api key (byok) */}
+        {!apiKey || keyOpen ? (
+          <Card rail={BLUE} style={{ marginTop: 20, padding: 12 }}>
+            <Tag>avain · anthropic api key</Tag>
+            <div className="flex items-center gap-2 mt-2">
+              <KeyRound size={14} style={{ color: MIST, flexShrink: 0 }} />
+              <input
+                type="password"
+                value={keyDraft}
+                onChange={(e) => setKeyDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") saveKey();
+                }}
+                placeholder="sk-ant-…"
+                autoComplete="off"
+                className="flex-1 bg-transparent outline-none"
+                style={{ fontFamily: MONO, fontSize: 13, color: INK }}
+              />
+              <button
+                onClick={saveKey}
+                disabled={!keyDraft.trim()}
+                className="px-3 py-1.5 rounded-sm"
+                style={{
+                  background: keyDraft.trim() ? INK : MIST,
+                  color: PAPER,
+                  fontSize: 12,
+                  letterSpacing: "0.06em",
+                  cursor: keyDraft.trim() ? "pointer" : "default",
+                  border: "none",
+                }}
+              >
+                tallenna
+              </button>
+              {apiKey && (
+                <button
+                  onClick={() => {
+                    setKeyDraft("");
+                    setKeyOpen(false);
+                  }}
+                  style={{ fontSize: 12, color: MIST, background: "transparent", border: "none", cursor: "pointer" }}
+                >
+                  peruuta
+                </button>
+              )}
+            </div>
+            <div style={{ fontSize: 10.5, color: MIST, marginTop: 8 }}>
+              bring your own key: stored only in this browser (localStorage), sent only to
+              api.anthropic.com. get one at console.anthropic.com. avoid saving it on shared machines.
+            </div>
+          </Card>
+        ) : (
+          <div className="flex items-center gap-2" style={{ marginTop: 20, fontSize: 11.5, color: MIST }}>
+            <KeyRound size={12} />
+            <span style={{ fontFamily: MONO, fontSize: 11 }}>{maskKey(apiKey)}</span>
+            <button
+              onClick={() => setKeyOpen(true)}
+              style={{ color: BLUE, background: "transparent", border: "none", cursor: "pointer", fontSize: 11.5, padding: 0 }}
+            >
+              vaihda
+            </button>
+            <span>·</span>
+            <button
+              onClick={clearKey}
+              style={{ color: BLUE, background: "transparent", border: "none", cursor: "pointer", fontSize: 11.5, padding: 0 }}
+            >
+              poista
+            </button>
+          </div>
+        )}
+
         {/* input */}
-        <Card style={{ marginTop: 24, padding: 12 }}>
+        <Card style={{ marginTop: 16, padding: 12 }}>
           <div className="flex items-center gap-2">
             <input
               value={sentence}
@@ -547,7 +677,7 @@ export default function Lausekone() {
                 )}
                 {gEn === null && gEs === null && (
                   <div style={{ fontSize: 10.5, color: MIST }}>
-                    google translate unreachable here (sandbox csp) — works if you run this file locally
+                    google translate unreachable (network/CORS) — showing claude's translation only
                   </div>
                 )}
               </div>
@@ -802,9 +932,14 @@ export default function Lausekone() {
                   <span style={{ fontFamily: MONO }}> turkunlp </span> docker container and delete the llm entirely.
                 </div>
                 <div>
-                  <b>google translate.</b> hit via the unofficial gtx endpoint. the artifact sandbox's csp
-                  usually blocks third-party fetches, so it falls back silently to claude's translation.
-                  same story for wiktionary lookups. both work if you run this file outside claude.ai.
+                  <b>your api key.</b> parsing runs on the anthropic api with a key you bring yourself
+                  (byok). it's stored only in this browser's localStorage and sent only to
+                  <span style={{ fontFamily: MONO }}> api.anthropic.com</span> — there's no backend.
+                  clear it anytime with “poista” next to the key.
+                </div>
+                <div>
+                  <b>google translate.</b> hit via the unofficial gtx endpoint, which sometimes blocks
+                  cross-origin requests — if so it falls back silently to claude's translation.
                 </div>
                 <div>
                   <b>trust.</b> morphology of common vocab is solid; rare compounds, consonant-gradation
@@ -822,4 +957,10 @@ export default function Lausekone() {
       </div>
     </div>
   );
+}
+
+// mount when loaded as a page (index.html provides #root); harmless when imported as a module
+if (typeof document !== "undefined") {
+  const rootEl = document.getElementById("root");
+  if (rootEl) createRoot(rootEl).render(<Lausekone />);
 }
