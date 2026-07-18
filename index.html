@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lausekone · finnish sentence anatomy</title>
+    <meta
+      name="description"
+      content="paste a finnish sentence, get its anatomy: cases, morpheme boundaries, and dependency arcs. bring your own anthropic api key."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>❄️</text></svg>"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "https://esm.sh/react@18.3.1",
+          "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1",
+          "lucide-react": "https://esm.sh/lucide-react@0.469.0?deps=react@18.3.1"
+        }
+      }
+    </script>
+    <style>
+      body {
+        margin: 0;
+      }
+      #boot {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #5f6b73;
+        font: italic 14px 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+        background: #f2f4f3;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"><div id="boot">hetkinen… loading lausekone</div></div>
+    <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+    <script type="text/babel" data-type="module" data-presets="react" src="./lausekone.jsx"></script>
+  </body>
+</html>
