@@ -138,7 +138,7 @@ function buildParsePrompt(sentence) {
   ].join("\n");
 }
 
-async function callClaude(prompt) {
+async function callClaudeText(prompt, maxTokens) {
   const key = getStoredKey();
   if (!key) {
     throw new Error("no api key set — add your anthropic api key in “avain · api key” above.");
@@ -153,7 +153,7 @@ async function callClaude(prompt) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1000,
+      max_tokens: maxTokens || 4000,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -169,8 +169,47 @@ async function callClaude(prompt) {
     .filter((b) => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+  if (data.stop_reason === "max_tokens") {
+    throw new Error("the response hit the length limit and was cut off — try a shorter sentence.");
+  }
+  return text;
+}
+
+async function callClaude(prompt, maxTokens) {
+  const text = await callClaudeText(prompt, maxTokens);
   const clean = text.replace(/```json|```/g, "").trim();
   return JSON.parse(clean);
+}
+
+function buildToFinnishPrompt(input) {
+  return [
+    "translate the sentence at the end (english or spanish) into natural, everyday finnish suitable for a learner.",
+    'respond with ONLY valid json, no fences: {"fi":"finnish translation"}.',
+    'if the input is already finnish, return it unchanged. if it is not translatable text, return {"error":"short reason"}.',
+    'sentence: "' + input.replace(/"/g, "'") + '"',
+  ].join("\n");
+}
+
+function buildMoreExamplesPrompt(existing) {
+  return [
+    "generate 5 new short finnish example sentences (3-8 words each) for a learner practicing case endings.",
+    "vary the cases across the set (locatives, partitive, genitive, essive/translative...). everyday vocabulary.",
+    "do NOT repeat or trivially vary any of these existing sentences:",
+    existing.map((e) => "- " + e).join("\n"),
+    'respond with ONLY valid json, no fences: {"examples":["...","...","...","...","..."]}',
+  ].join("\n");
+}
+
+function buildExpandPrompt(sentence, tok) {
+  const cn = tok.feats && tok.feats.case ? tok.feats.case : null;
+  return [
+    "you are a friendly finnish grammar tutor for an english-speaking learner (who also speaks rioplatense spanish).",
+    'in the sentence "' + sentence.replace(/"/g, "'") + '", explain the word "' + tok.text + '"',
+    "(lemma: " + tok.lemma + (cn ? ", case: " + cn : "") + (tok.morph ? ", segmentation: " + tok.morph : "") + ").",
+    "cover: why this exact form is required here, what the ending contributes, how the base word changes (consonant gradation / vowel harmony if relevant),",
+    "and 1-2 tiny contrastive examples showing what a different case/form would mean instead.",
+    "plain text, no markdown, 80-130 words, warm but dense.",
+  ].join("\n");
 }
 
 // unofficial endpoint; may be blocked by network/CORS — we fall back silently
@@ -391,6 +430,11 @@ export default function Lausekone() {
   const [cdefs, setCdefs] = useState({});
   const [showSheet, setShowSheet] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [mode, setMode] = useState("fi");
+  const [busyMsg, setBusyMsg] = useState(null);
+  const [examples, setExamples] = useState(EXAMPLES);
+  const [exBusy, setExBusy] = useState(false);
+  const [expls, setExpls] = useState({});
   const [apiKey, setApiKey] = useState(() => getStoredKey());
   const [keyDraft, setKeyDraft] = useState("");
   const [keyOpen, setKeyOpen] = useState(false);
@@ -413,38 +457,86 @@ export default function Lausekone() {
   };
 
   const analyze = useCallback(
-    async (raw) => {
-      const s = (raw != null ? raw : sentence).trim();
+    async (raw, modeOverride) => {
+      let s = (raw != null ? raw : sentence).trim();
+      const m = modeOverride || mode;
       if (!s || busy) return;
       setBusy(true);
+      setBusyMsg(null);
       setErr(null);
       setResult(null);
       setSelId(null);
+      setExpls({});
       setGEn(undefined);
       setGEs(undefined);
       try {
+        if (m === "xlate") {
+          setBusyMsg("hetkinen… translating to finnish");
+          const t = await callClaude(buildToFinnishPrompt(s));
+          if (t && t.error) {
+            setErr(t.error);
+            return;
+          }
+          if (!t || !t.fi) {
+            setErr("translation failed — try rephrasing.");
+            return;
+          }
+          s = String(t.fi).trim();
+          setSentence(s);
+        }
+        setBusyMsg(null);
         const parsed = await callClaude(buildParsePrompt(s));
         if (parsed && parsed.error) {
           setErr(parsed.error);
         } else if (!parsed || !Array.isArray(parsed.tokens) || parsed.tokens.length === 0) {
-          setErr("parser returned malformed json — probably truncated. try a shorter sentence.");
+          setErr("parser returned malformed json. hit jäsennä again.");
         } else {
           setResult(parsed);
           tryGoogle(s, "en").then(setGEn);
           tryGoogle(s, "es").then(setGEs);
         }
       } catch (e) {
-        setErr(
-          "parse failed: " +
-            (e && e.message ? e.message : String(e)) +
-            " — usually truncated json. shorten the sentence or hit jäsennä again."
-        );
+        setErr("parse failed: " + (e && e.message ? e.message : String(e)));
       } finally {
         setBusy(false);
+        setBusyMsg(null);
       }
     },
-    [sentence, busy]
+    [sentence, busy, mode]
   );
+
+  const moreExamples = async () => {
+    if (exBusy) return;
+    setExBusy(true);
+    setErr(null);
+    try {
+      const d = await callClaude(buildMoreExamplesPrompt(examples));
+      const fresh = (d && Array.isArray(d.examples) ? d.examples : [])
+        .map((x) => String(x).trim())
+        .filter((x) => x && !examples.includes(x));
+      if (!fresh.length) throw new Error("no new examples came back — try again.");
+      setExamples((prev) => prev.concat(fresh));
+    } catch (e) {
+      setErr("example generation failed: " + (e && e.message ? e.message : String(e)));
+    } finally {
+      setExBusy(false);
+    }
+  };
+
+  const expandToken = async (tok) => {
+    if (!result || !tok) return;
+    const id = tok.id;
+    setExpls((x) => Object.assign({}, x, { [id]: { loading: true } }));
+    try {
+      const sentenceText = result.tokens.map((t) => t.text).join(" ");
+      const text = await callClaudeText(buildExpandPrompt(sentenceText, tok), 1000);
+      setExpls((x) => Object.assign({}, x, { [id]: { text: text.trim() } }));
+    } catch (e) {
+      setExpls((x) =>
+        Object.assign({}, x, { [id]: { err: (e && e.message ? e.message : String(e)) } })
+      );
+    }
+  };
 
   const lookupWikt = async (lemma) => {
     const key = String(lemma || "").toLowerCase();
@@ -586,6 +678,34 @@ export default function Lausekone() {
 
         {/* input */}
         <Card style={{ marginTop: 16, padding: 12 }}>
+          <div className="flex items-center gap-1.5 mb-2">
+            {[
+              { id: "fi", label: "suomi" },
+              { id: "xlate", label: "en/es → fi" },
+            ].map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setMode(m.id)}
+                className="px-2 py-0.5 rounded-sm"
+                style={{
+                  fontSize: 10.5,
+                  letterSpacing: "0.1em",
+                  fontFamily: MONO,
+                  color: mode === m.id ? PAPER : MIST,
+                  background: mode === m.id ? BLUE : "transparent",
+                  border: "1px solid " + (mode === m.id ? BLUE : LINE),
+                  cursor: "pointer",
+                }}
+              >
+                {m.label}
+              </button>
+            ))}
+            {mode === "xlate" && (
+              <span style={{ fontSize: 10.5, color: MIST, marginLeft: 4 }}>
+                write in english or spanish — it gets translated to finnish, then analyzed
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <input
               value={sentence}
@@ -593,7 +713,7 @@ export default function Lausekone() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") analyze();
               }}
-              placeholder="Kirjoita lause tähän…"
+              placeholder={mode === "xlate" ? "Write a sentence in English or Spanish…" : "Kirjoita lause tähän…"}
               className="flex-1 bg-transparent outline-none"
               style={{ fontFamily: SERIF, fontSize: 18, color: INK }}
             />
@@ -610,16 +730,17 @@ export default function Lausekone() {
               }}
             >
               {busy ? <Loader2 size={14} className="animate-spin" /> : <CornerDownLeft size={13} />}
-              jäsennä
+              {mode === "xlate" ? "käännä & jäsennä" : "jäsennä"}
             </button>
           </div>
           <div className="flex flex-wrap gap-1.5 mt-3">
-            {EXAMPLES.map((ex) => (
+            {examples.map((ex) => (
               <button
                 key={ex}
                 onClick={() => {
+                  setMode("fi");
                   setSentence(ex);
-                  analyze(ex);
+                  analyze(ex, "fi");
                 }}
                 className="px-2 py-1 rounded-sm"
                 style={{ border: "1px solid " + LINE, fontSize: 11.5, color: MIST, fontFamily: SERIF, cursor: "pointer", background: "transparent" }}
@@ -627,9 +748,25 @@ export default function Lausekone() {
                 {ex}
               </button>
             ))}
+            <button
+              onClick={moreExamples}
+              disabled={exBusy}
+              className="flex items-center gap-1 px-2 py-1 rounded-sm"
+              style={{
+                border: "1px dashed " + LINE,
+                fontSize: 11.5,
+                color: BLUE,
+                fontFamily: SERIF,
+                cursor: exBusy ? "default" : "pointer",
+                background: "transparent",
+              }}
+            >
+              {exBusy && <Loader2 size={11} className="animate-spin" />}
+              {exBusy ? "keksitään…" : "+ lisää esimerkkejä · more examples"}
+            </button>
           </div>
           <div style={{ fontSize: 10.5, color: MIST, marginTop: 10 }}>
-            best under ~12 words per pass · an llm does the parsing, so double-check rare compounds
+            one sentence per pass works best · an llm does the parsing, so double-check rare compounds
           </div>
         </Card>
 
@@ -644,7 +781,7 @@ export default function Lausekone() {
         {busy && (
           <div className="flex items-center gap-2 mt-8" style={{ color: MIST, fontSize: 13 }}>
             <Loader2 size={14} className="animate-spin" />
-            <span style={{ fontFamily: SERIF, fontStyle: "italic" }}>hetkinen… splitting morphemes</span>
+            <span style={{ fontFamily: SERIF, fontStyle: "italic" }}>{busyMsg || "hetkinen… splitting morphemes"}</span>
           </div>
         )}
 
@@ -744,6 +881,45 @@ export default function Lausekone() {
                   {selTok.why && (
                     <div style={{ fontFamily: SERIF, fontStyle: "italic", marginTop: 6 }}>{selTok.why}</div>
                   )}
+                  {(() => {
+                    const ex = expls[selTok.id];
+                    if (!ex) {
+                      return (
+                        <button
+                          onClick={() => expandToken(selTok)}
+                          style={{ fontSize: 12, color: BLUE, background: "transparent", border: "none", cursor: "pointer", padding: 0, textAlign: "left", marginTop: 4 }}
+                        >
+                          selitä tarkemmin · expand on this explanation
+                        </button>
+                      );
+                    }
+                    if (ex.loading) {
+                      return (
+                        <div className="flex items-center gap-1.5" style={{ fontSize: 12, color: MIST, marginTop: 4 }}>
+                          <Loader2 size={12} className="animate-spin" /> thinking it through…
+                        </div>
+                      );
+                    }
+                    if (ex.err) {
+                      return <div style={{ fontSize: 11.5, color: MIST, marginTop: 4 }}>expand failed: {ex.err}</div>;
+                    }
+                    return (
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          marginTop: 8,
+                          padding: "8px 10px",
+                          background: PAPER,
+                          border: "1px solid " + LINE,
+                          borderRadius: 2,
+                          whiteSpace: "pre-wrap",
+                        }}
+                      >
+                        <Tag>tarkemmin · in depth</Tag>
+                        <div style={{ marginTop: 4 }}>{ex.text}</div>
+                      </div>
+                    );
+                  })()}
                   <div style={{ marginTop: 6 }}>
                     <span style={{ fontFamily: MONO, fontSize: 10, color: MIST }}>en&nbsp;&nbsp;</span>
                     {selTok.gloss_en}
